@@ -5,6 +5,11 @@ on:
     branches: [master, next]
     paths:
       - 'ts/**'
+      # A catalog pin or lockfile change swaps what every ts/** package
+      # resolves without touching one of their files -- @composio/client
+      # 0.1.0-alpha.76 -> 2.0.0-rc.5 skipped this suite entirely that way.
+      - 'pnpm-workspace.yaml'
+      - 'pnpm-lock.yaml'
       - '.github/actions/setup-node-pnpm-bun/action.yml'
       - '.github/workflows/ts.test-e2e.yml'
       - 'mise.toml'
@@ -13,6 +18,11 @@ on:
   pull_request:
     paths:
       - 'ts/**'
+      # A catalog pin or lockfile change swaps what every ts/** package
+      # resolves without touching one of their files -- @composio/client
+      # 0.1.0-alpha.76 -> 2.0.0-rc.5 skipped this suite entirely that way.
+      - 'pnpm-workspace.yaml'
+      - 'pnpm-lock.yaml'
       - '.github/actions/setup-node-pnpm-bun/action.yml'
       - '.github/workflows/ts.test-e2e.yml'
       - 'mise.toml'
@@ -41,7 +51,7 @@ jobs:
       deno: ${{ steps.versions.outputs.deno }}
     steps:
       - name: Checkout Code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Read versions
         id: versions
@@ -72,7 +82,7 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Normalize Composio API keys
         run: |
@@ -157,7 +167,7 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Normalize Composio API keys
         run: |
@@ -168,7 +178,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Setup Deno
-        uses: denoland/setup-deno@667a34cdef165d8d2b2e98dde39547c9daac7282 # v2.0.4
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
           deno-version: ${{ matrix.deno-version }}
 
@@ -228,7 +238,7 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Normalize Composio API keys
         run: |
@@ -306,7 +316,7 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Normalize Composio API keys
         run: |
@@ -320,7 +330,6 @@ jobs:
         uses: ./.github/actions/setup-node-pnpm-bun
         with:
           enable-turbo-cache: 'true'
-          node-version: '22.22.3'
 
       - name: Install Dependencies
         run: pnpm install --frozen-lockfile

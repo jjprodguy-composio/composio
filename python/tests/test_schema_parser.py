@@ -8,8 +8,10 @@ particularly focusing on the required field propagation bug that was fixed.
 import typing as t
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter, ValidationError
 from pydantic.fields import PydanticUndefined
+
+from tests.fixtures.json_schema_conversion_corpus import find_case, load_object_cases
 
 from composio.utils.shared import (
     get_signature_format_from_schema_params,
@@ -322,6 +324,35 @@ class TestJsonSchemaToModel:
         model_class = json_schema_to_model(json_schema)
         instance = model_class(tags=["tag1", "tag2"])
         assert instance.tags == ["tag1", "tag2"]
+
+    @pytest.mark.parametrize(
+        ("title", "expected_model_name"),
+        [
+            ({}, "GeneratedModel"),
+            ({"title": None}, "GeneratedModel"),
+            ({"title": ""}, ""),
+        ],
+    )
+    def test_title_uses_expected_model_name(self, title, expected_model_name):
+        """Missing or null titles must not reach Pydantic's model factory."""
+        json_schema = {
+            **title,
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "value": {"type": "integer"},
+            },
+            "required": ["name"],
+        }
+
+        model_class = json_schema_to_model(json_schema)
+        assert model_class.__name__ == expected_model_name
+        instance = model_class(name="test", value=42)
+        assert instance.name == "test"
+        assert instance.value == 42
+
+        with pytest.raises(ValidationError):
+            model_class()
 
 
 class TestPydanticModelFromParamSchema:
@@ -673,10 +704,10 @@ class TestJsonSchemaToPydanticType:
         )
 
     def test_allof_empty_options(self):
-        """Test allOf with empty options falls back to string."""
+        """Test allOf with empty options accepts any value."""
         json_schema = {"allOf": []}
         result = json_schema_to_pydantic_type(json_schema)
-        assert result is str
+        assert result is t.Any
 
 
 class TestJsonSchemaToFieldsDict:
@@ -1098,7 +1129,7 @@ class TestBooleanSchemas:
     @pytest.mark.unit
     @pytest.mark.schema
     def test_only_false_schemas_in_anyof(self):
-        """Test anyOf with only false schemas falls back to string."""
+        """Test anyOf with only false schemas rejects every value."""
         json_schema = {
             "anyOf": [
                 False,
@@ -1106,8 +1137,10 @@ class TestBooleanSchemas:
             ]
         }
         result = json_schema_to_pydantic_type(json_schema)
-        # All false schemas filtered out, should fall back to string
-        assert result is str
+        adapter = TypeAdapter(result)
+        for value in (None, "some string", 123, {}, []):
+            with pytest.raises(ValidationError):
+                adapter.validate_python(value)
 
     @pytest.mark.unit
     @pytest.mark.schema
@@ -1467,10 +1500,14 @@ class TestGetSignatureFormatFromSchemaParams:
     """Test cases for get_signature_format_from_schema_params union handling."""
 
     @staticmethod
-    def _annotation(schema):
+    def _parameter(schema):
         params = get_signature_format_from_schema_params(schema)
         assert len(params) == 1
-        return params[0].annotation
+        return params[0]
+
+    @classmethod
+    def _annotation(cls, schema):
+        return cls._parameter(schema).annotation
 
     @pytest.mark.unit
     @pytest.mark.schema
@@ -1602,6 +1639,289 @@ class TestGetSignatureFormatFromSchemaParams:
         assert str in args
         assert type(None) in args
 
+    @pytest.mark.unit
+    @pytest.mark.schema
+    @pytest.mark.parametrize(
+        ("schema_type", "expected_members"),
+        [
+            (["string", "null"], {str, type(None)}),
+            (["integer"], {int}),
+            (["string", "integer"], {str, int}),
+            (["file", "null"], {t.Any, type(None)}),
+        ],
+    )
+    def test_type_list_resolves(self, schema_type, expected_members):
+        """List-valued JSON Schema types produce an annotation without raising."""
+        annotation = self._annotation({"properties": {"value": {"type": schema_type}}})
+        actual = set(t.get_args(annotation)) if t.get_args(annotation) else {annotation}
+        assert expected_members <= actual
+
+    @pytest.mark.unit
+    @pytest.mark.schema
+    @pytest.mark.parametrize(
+        ("schema_type", "expected_annotation", "expected_default"),
+        [
+            (["integer"], int, 0),
+            (["boolean"], bool, False),
+            (["array"], t.List, []),
+        ],
+    )
+    def test_single_type_list_uses_scalar_fallback(
+        self, schema_type, expected_annotation, expected_default
+    ):
+        """A one-item type list keeps its scalar type's implicit default."""
+        parameter = self._parameter({"properties": {"value": {"type": schema_type}}})
+
+        assert parameter.annotation is expected_annotation
+        assert parameter.default == expected_default
+
+    @pytest.mark.unit
+    @pytest.mark.schema
+    def test_single_type_list_preserves_explicit_default(self):
+        """An explicit default overrides the fallback for a one-item type list."""
+        parameter = self._parameter(
+            {"properties": {"value": {"type": ["integer"], "default": 42}}}
+        )
+
+        assert parameter.default == 42
+
+    @pytest.mark.unit
+    @pytest.mark.schema
+    def test_multi_type_list_keeps_union_fallback(self):
+        """A multi-type list remains a union with the existing empty-string fallback."""
+        parameter = self._parameter(
+            {"properties": {"value": {"type": ["integer", "null"]}}}
+        )
+
+        assert {int, type(None)} <= set(t.get_args(parameter.annotation))
+        assert parameter.default == ""
+
+    @pytest.mark.unit
+    @pytest.mark.schema
+    def test_combiner_option_with_type_list_resolves(self):
+        """List-valued types inside combiners do not reach a scalar dict lookup."""
+        schema = {
+            "properties": {
+                "value": {
+                    "anyOf": [
+                        {"type": ["string", "null"]},
+                        {"type": "integer"},
+                    ]
+                }
+            }
+        }
+
+        annotation = self._annotation(schema)
+        assert {str, int, type(None)} <= set(t.get_args(annotation))
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestSharedObjectCorpusThroughJsonSchemaToModel:
+    """`json_schema_to_model` must satisfy the shared cross-SDK object contract.
+
+    This is the provider-facing entry point (`args_schema`), so a model that
+    accepts an argument but discards it is as much a defect as one that rejects
+    a valid payload.
+    """
+
+    @pytest.mark.parametrize(
+        "case,index",
+        [
+            (case, index)
+            for case in load_object_cases()
+            for index in range(len(case.instances))
+        ],
+        ids=[
+            f"{case.id}[{index}]"
+            for case in load_object_cases()
+            for index in range(len(case.instances))
+        ],
+    )
+    def test_case(self, case, index: int) -> None:
+        instance = case.instances[index]
+        model = json_schema_to_model(case.schema_)
+
+        if not instance.accepted_for("python"):
+            with pytest.raises(ValidationError):
+                model.model_validate(instance.input)
+            return
+
+        result = model.model_validate(instance.input)
+        if instance.python is not None and instance.python.has_output:
+            assert (
+                result.model_dump(mode="json", by_alias=True) == instance.python.output
+            )
+
+    def test_free_form_content_is_readable_as_attributes(self) -> None:
+        """Preserved dynamic keys must survive `getattr`, not just `model_dump`."""
+        case = find_case("root-free-form-absent-properties")
+        model = json_schema_to_model(case.schema_)
+
+        result = model.model_validate(case.instances[0].input)
+
+        assert getattr(result, "anything") == {"a": 1}
+        assert getattr(result, "other") == "x"
+
+    @pytest.mark.parametrize(
+        ("case_id", "expected"),
+        [
+            ("named-properties-strict-by-default", {"additionalProperties": False}),
+            (
+                "root-additional-properties-schema-valued",
+                {"additionalProperties": {"type": "number"}},
+            ),
+            (
+                "pattern-only-object",
+                {"patternProperties": {"^s_": {"type": "string"}}},
+            ),
+        ],
+    )
+    def test_model_json_schema_preserves_root_object_policy(
+        self,
+        case_id: str,
+        expected: t.Dict[str, t.Any],
+    ) -> None:
+        model = json_schema_to_model(find_case(case_id).schema_)
+        advertised = model.model_json_schema()
+
+        for key, value in expected.items():
+            assert advertised[key] == value
+
+    def test_dynamic_schema_resolves_local_json_pointer(self) -> None:
+        schema = {
+            "$defs": {"positive": {"type": "integer", "minimum": 1}},
+            "type": "object",
+            "patternProperties": {"^count_": {"$ref": "#/$defs/positive"}},
+        }
+        model = json_schema_to_model(schema)
+
+        assert model.model_validate({"count_a": 1}).model_dump() == {"count_a": 1}
+        with pytest.raises(ValidationError):
+            model.model_validate({"count_a": 0})
+
+    def test_nested_dynamic_schema_resolves_against_document_root(self) -> None:
+        schema = {
+            "$defs": {"positive": {"type": "integer", "minimum": 1}},
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "type": "object",
+                    "patternProperties": {"^count_": {"$ref": "#/$defs/positive"}},
+                    "additionalProperties": False,
+                }
+            },
+            "required": ["payload"],
+        }
+        model = json_schema_to_model(schema)
+
+        result = model.model_validate({"payload": {"count_a": 1}})
+        assert result.model_dump() == {"payload": {"count_a": 1}}
+        with pytest.raises(ValidationError):
+            model.model_validate({"payload": {"count_a": 0}})
+
+    def test_dynamic_schema_materialization_cannot_reject_valid_input(self) -> None:
+        schema = {
+            "type": "object",
+            "patternProperties": {"^value_": {"enum": [1], "default": 1}},
+        }
+        model = json_schema_to_model(schema)
+
+        assert model.model_validate({"value_a": 1}).model_dump() == {"value_a": 1}
+
+    @pytest.mark.parametrize(
+        "reference",
+        ["#/$defs/missing", "https://example.com/schema.json"],
+    )
+    def test_dynamic_schema_rejects_unresolvable_reference(
+        self,
+        reference: str,
+    ) -> None:
+        schema = {
+            "type": "object",
+            "patternProperties": {"^value_": {"$ref": reference}},
+        }
+
+        with pytest.raises(ValueError, match="schema reference"):
+            json_schema_to_model(schema)
+
+    def test_dynamic_schema_rejects_invalid_pattern(self) -> None:
+        schema = {
+            "type": "object",
+            "patternProperties": {"[": {"type": "string"}},
+        }
+
+        with pytest.raises(ValueError, match="Invalid patternProperties"):
+            json_schema_to_model(schema)
+
+    def test_dynamic_schema_checks_references_inside_local_target(self) -> None:
+        schema = {
+            "$defs": {"nested": {"$ref": "https://example.com/external-schema.json"}},
+            "type": "object",
+            "patternProperties": {"^value_": {"$ref": "#/$defs/nested"}},
+        }
+
+        with pytest.raises(ValueError, match="must be a local JSON Pointer"):
+            json_schema_to_model(schema)
+
+    @pytest.mark.parametrize(
+        "keyword,value,accepted",
+        [
+            (
+                "default",
+                {"$ref": "https://example.com/schema.json"},
+                {"$ref": "kept"},
+            ),
+            ("const", {"$ref": "other.json#/thing"}, {"$ref": "other.json#/thing"}),
+            ("enum", [{"$ref": "#/$defs/missing"}], {"$ref": "#/$defs/missing"}),
+            ("examples", [{"$ref": "#anchor"}], {"$ref": "kept"}),
+        ],
+    )
+    def test_dynamic_schema_ignores_reference_shaped_instance_data(
+        self,
+        keyword: str,
+        value: t.Any,
+        accepted: t.Dict[str, t.Any],
+    ) -> None:
+        """`$ref`-shaped payloads are data, not references, and must not raise."""
+        schema = {
+            "type": "object",
+            "patternProperties": {"^value_": {"type": "object", keyword: value}},
+        }
+
+        model = json_schema_to_model(schema)
+
+        assert model.model_validate({"value_a": accepted}).model_dump() == {
+            "value_a": accepted
+        }
+
+    @pytest.mark.parametrize(
+        "dynamic_schema",
+        [
+            {"type": "array", "items": {"$ref": "https://example.com/schema.json"}},
+            {"allOf": [{"$ref": "https://example.com/schema.json"}]},
+            {
+                "type": "object",
+                "properties": {"inner": {"$ref": "https://example.com/schema.json"}},
+            },
+            {
+                "type": "object",
+                "additionalProperties": {
+                    "$ref": "https://example.com/schema.json",
+                },
+            },
+        ],
+    )
+    def test_dynamic_schema_checks_references_in_nested_schema_positions(
+        self,
+        dynamic_schema: t.Dict[str, t.Any],
+    ) -> None:
+        schema = {
+            "type": "object",
+            "patternProperties": {"^value_": dynamic_schema},
+        }
+
+        with pytest.raises(ValueError, match="must be a local JSON Pointer"):
+            json_schema_to_model(schema)

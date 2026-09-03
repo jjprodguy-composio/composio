@@ -37,14 +37,14 @@ interface MockedOpenAIChatCompletionTool {
   function: {
     name: string;
     description?: string;
-    parameters?: any;
+    parameters?: unknown;
   };
 }
 
 describe('OpenAIProvider', () => {
   let provider: OpenAIProvider;
   let mockTool: Tool;
-  let mockExecuteToolFn: any;
+  let mockExecuteToolFn: unknown;
 
   beforeEach(() => {
     provider = new OpenAIProvider();
@@ -121,6 +121,18 @@ describe('OpenAIProvider', () => {
           parameters: undefined,
         },
       });
+    });
+
+    it('deduplicates required entries for directly wrapped tools', () => {
+      const wrapped = provider.wrapTool({
+        ...mockTool,
+        inputParameters: {
+          ...mockTool.inputParameters!,
+          required: ['input', 'input'],
+        },
+      }) as MockedOpenAIChatCompletionTool;
+
+      expect(wrapped.function.parameters.required).toEqual(['input']);
     });
   });
 
